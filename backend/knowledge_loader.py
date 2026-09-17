@@ -14,6 +14,12 @@ TEXT_EXTS = {".txt", ".md", ".json"}
 EXCEL_EXTS = {".xlsx", ".xlsm"}
 WORD_EXTS = {".docx"}
 
+SOURCE_DIRS = {
+    "qa_form": "QA Form / Rubric",
+    "original_matrix": "Original Matrix",
+    "matrix_updates": "Matrix update emails sent",
+}
+
 
 def _read_text(path: Path) -> str:
     if path.suffix.lower() == ".json":
@@ -53,6 +59,10 @@ def _read_docx(path: Path) -> str:
 
 
 def source_label(path: Path) -> str:
+    parent = path.parent.name.lower()
+    if parent in SOURCE_DIRS:
+        return SOURCE_DIRS[parent]
+
     name = path.name.lower()
     if "email" in name or "issue" in name or "update" in name:
         return "Matrix update emails sent"
@@ -61,6 +71,15 @@ def source_label(path: Path) -> str:
     if "qa" in name or "rubric" in name or "fly" in name:
         return "QA Form / Rubric"
     return path.stem
+
+
+def source_folder(source_type: str) -> Path:
+    key = str(source_type or "").strip().lower()
+    if key not in SOURCE_DIRS:
+        raise ValueError("Unknown QA source type")
+    folder = KNOWLEDGE / key
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
 
 
 def load_knowledge_text(max_chars_per_file: int = 160000) -> str:
