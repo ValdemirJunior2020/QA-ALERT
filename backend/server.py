@@ -117,7 +117,7 @@ def worker_status():
             SELECT id,call_id,agent,call_center,status,transcript_language,
                    transcription_started_at,transcription_completed_at,audio_deleted_at,
                    transcription_error,transcript_path,itinerary,booking_count,booking_match_status,
-                   booking_match_confidence,qa_process,qa_matrix_source,slack_alert_sent_at
+                   booking_match_confidence,qa_process,qa_matrix_source,slack_alert_sent_at,updated_at
             FROM cases
             WHERE transcription_started_at IS NOT NULL OR transcript_text IS NOT NULL
             ORDER BY COALESCE(transcription_completed_at,transcription_started_at,updated_at) DESC
