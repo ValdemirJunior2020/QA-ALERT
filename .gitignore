@@ -14,3 +14,4 @@ backups/
 playwright-profile/
 node_modules/
 dist/
+.netlify/
