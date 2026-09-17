@@ -12,6 +12,13 @@ if not exist .venv\Scripts\python.exe (
 call .venv\Scripts\activate.bat
 if exist .env for /f "usebackq tokens=1,* delims==" %%A in (".env") do if not "%%A"=="" if not "%%A:~0,1"=="#" set "%%A=%%B"
 
+python -m backend.bootstrap_auth
+if errorlevel 1 (
+  echo [QA ALERT] Admin login configuration failed. Check QA_ALERT_ADMIN_USERNAME and QA_ALERT_ADMIN_PASSWORD in .env.
+  pause
+  exit /b 1
+)
+
 set "CF_CONFIG=%USERPROFILE%\.cloudflared\config.yml"
 
 where cloudflared >nul 2>nul
