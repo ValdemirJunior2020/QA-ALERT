@@ -1,81 +1,74 @@
 const HOP_BY_HOP = new Set([
-  'connection','keep-alive','proxy-authenticate','proxy-authorization',
-  'te','trailers','transfer-encoding','upgrade','host','content-length'
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailers",
+  "transfer-encoding",
+  "upgrade",
+  "host",
+  "content-length",
 ]);
 
 function cleanBase(value) {
-  return String(value || '').trim().replace(/\/+$/, '');
+  return String(value || "").trim().replace(/\/+$/, "");
 }
 
-exports.handler = async function handler(event) {
-  const backend = cleanBase(process.env.QA_ALERT_BACKEND_URL);
+export default async (req) => {
+  const backend = cleanBase(Netlify.env.get("QA_ALERT_BACKEND_URL"));
   if (!backend) {
-    return {
-      statusCode: 503,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        detail: 'Netlify is ready, but QA_ALERT_BACKEND_URL is not configured yet.'
-      })
-    };
+    return Response.json(
+      { detail: "Netlify is ready, but QA_ALERT_BACKEND_URL is not configured yet." },
+      { status: 503 },
+    );
   }
 
-  const path = event.path.replace(/^\/\.netlify\/functions\/api-proxy/, '') || '/';
-  const query = event.rawQuery ? `?${event.rawQuery}` : '';
-  const target = `${backend}/api${path}${query}`;
+  const incomingUrl = new URL(req.url);
+  const target = `${backend}${incomingUrl.pathname}${incomingUrl.search}`;
 
-  const headers = {};
-  for (const [key, value] of Object.entries(event.headers || {})) {
-    const lower = key.toLowerCase();
-    if (!HOP_BY_HOP.has(lower) && value != null) headers[lower] = value;
+  const headers = new Headers(req.headers);
+  for (const key of HOP_BY_HOP) headers.delete(key);
+
+  const cfClientId = Netlify.env.get("CF_ACCESS_CLIENT_ID");
+  const cfClientSecret = Netlify.env.get("CF_ACCESS_CLIENT_SECRET");
+  if (cfClientId && cfClientSecret) {
+    headers.set("cf-access-client-id", cfClientId);
+    headers.set("cf-access-client-secret", cfClientSecret);
   }
 
-  // Optional Cloudflare Access service-token support.
-  if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
-    headers['cf-access-client-id'] = process.env.CF_ACCESS_CLIENT_ID;
-    headers['cf-access-client-secret'] = process.env.CF_ACCESS_CLIENT_SECRET;
-  }
+  const init = {
+    method: req.method,
+    headers,
+    redirect: "manual",
+  };
 
-  const method = event.httpMethod || 'GET';
-  const init = { method, headers, redirect: 'manual' };
-  if (!['GET', 'HEAD'].includes(method) && event.body != null) {
-    init.body = event.isBase64Encoded
-      ? Buffer.from(event.body, 'base64')
-      : event.body;
+  if (!["GET", "HEAD"].includes(req.method)) {
+    init.body = await req.arrayBuffer();
   }
 
   try {
     const response = await fetch(target, init);
-    const responseHeaders = {};
-    response.headers.forEach((value, key) => {
-      const lower = key.toLowerCase();
-      if (!HOP_BY_HOP.has(lower) && lower !== 'set-cookie') responseHeaders[key] = value;
-    });
+    const responseHeaders = new Headers(response.headers);
+    for (const key of HOP_BY_HOP) responseHeaders.delete(key);
+    responseHeaders.delete("set-cookie");
 
-    const contentType = response.headers.get('content-type') || '';
-    const disposition = response.headers.get('content-disposition');
-    if (disposition) responseHeaders['content-disposition'] = disposition;
-
-    const buffer = Buffer.from(await response.arrayBuffer());
-    const isText =
-      contentType.startsWith('text/') ||
-      contentType.includes('json') ||
-      contentType.includes('javascript') ||
-      contentType.includes('xml');
-
-    return {
-      statusCode: response.status,
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
       headers: responseHeaders,
-      body: isText ? buffer.toString('utf8') : buffer.toString('base64'),
-      isBase64Encoded: !isText
-    };
+    });
   } catch (error) {
-    return {
-      statusCode: 502,
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        detail: 'QA ALERT backend is unreachable through the configured Cloudflare URL.',
-        error: String(error && error.message ? error.message : error)
-      })
-    };
+    return Response.json(
+      {
+        detail: "QA ALERT backend is unreachable through the configured Cloudflare URL.",
+        error: String(error?.message || error),
+      },
+      { status: 502 },
+    );
   }
+};
+
+export const config = {
+  path: "/api/*",
 };
