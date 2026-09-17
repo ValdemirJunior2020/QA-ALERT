@@ -23,5 +23,9 @@ while not database_ready():
     print("[QA WORKER] Waiting for QA ALERT database...")
     time.sleep(2)
 
-from backend.qa_worker import main
-main()
+import backend.qa_worker as qa_worker
+from backend.knowledge_loader import load_knowledge_text
+
+# Keep private Excel/Word Matrix files local and load them automatically.
+qa_worker._knowledge_text = load_knowledge_text
+qa_worker.main()
