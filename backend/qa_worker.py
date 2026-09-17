@@ -248,7 +248,7 @@ def next_case():
 
 def main():
     ensure_booking_schema()
-    write_status(state="idle", message="QA worker ready", model=OLLAMA_MODEL)
+    write_status(state="idle", message="QA worker ready", model=OLLAMA_MODEL, last_completed_call_id=None, last_completed_at=None)
     while True:
         try:
             row = next_case()
@@ -259,7 +259,17 @@ def main():
             write_status(state="qa_running", current_call_id=row["call_id"], current_agent=row["agent"], message=f"Matching booking and QA'ing {row['call_id']}")
             try:
                 process_case(row)
-                write_status(state="idle", last_completed_call_id=row["call_id"], last_completed_at=utc_now(), current_call_id=None, current_agent=None, message="QA cycle complete")
+                with db() as c:
+                    finished = c.execute("SELECT status FROM cases WHERE id=?", (row["id"],)).fetchone()
+                actual_completed = bool(finished and finished["status"] == "completed")
+                write_status(
+                    state="idle",
+                    last_completed_call_id=row["call_id"] if actual_completed else None,
+                    last_completed_at=utc_now() if actual_completed else None,
+                    current_call_id=None,
+                    current_agent=None,
+                    message="QA completed" if actual_completed else "QA cycle finished without a completed QA",
+                )
             except Exception as exc:
                 with db() as c:
                     c.execute("UPDATE cases SET status='qa_error',finding=?,updated_at=? WHERE id=?", (f"QA worker error: {exc}", utc_now(), row["id"]))
