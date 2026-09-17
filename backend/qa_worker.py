@@ -144,6 +144,7 @@ def _save_match(case_row, chosen, confidence: float, status: str):
 
 
 def _qa_case(case_row: sqlite3.Row, booking: dict) -> dict:
+    write_status(state="matrix_check", current_call_id=case_row["call_id"], current_agent=case_row["agent"], message=f"Checking Matrix sources for {case_row['call_id']}")
     knowledge = _knowledge_text()
     if not knowledge.strip():
         raise RuntimeError("QA knowledge is empty. Put the QA Form/Matrix/update source material in the knowledge folder.")
@@ -154,6 +155,7 @@ def _qa_case(case_row: sqlite3.Row, booking: dict) -> dict:
         "Never invent a requirement. If the evidence is insufficient, do not fail the agent. "
         "Return JSON only with: issue_found(bool), score(number|null), severity(info|warning|critical), guest_request, agent_action, process, matrix_source, finding, evidence_excerpt."
     )
+    write_status(state="ollama_qa", current_call_id=case_row["call_id"], current_agent=case_row["agent"], message=f"Running Ollama QA for {case_row['call_id']}")
     return _ollama_json(system, {
         "transcript": case_row["transcript_text"],
         "booking": booking,
@@ -195,6 +197,7 @@ def process_case(row: sqlite3.Row):
             c.execute("UPDATE cases SET missing_notes=0,severity='info',finding=NULL,status='completed_no_booking',updated_at=? WHERE id=?", (utc_now(), row["id"]))
         return
 
+    write_status(state="booking_matching", current_call_id=row["call_id"], current_agent=row["agent"], message=f"Matching booking for {row['call_id']}")
     chosen, confidence, match_status = match_one_booking(row)
     _save_match(row, chosen, confidence, match_status)
     if not chosen:
