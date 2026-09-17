@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>QA ALERT · Automation Rules</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#eef2f7;color:#1b2946;font-family:Arial,sans-serif}.wrap{max-width:980px;margin:28px auto;padding:18px}.head{background:linear-gradient(135deg,#111b3e,#2d407b,#472d76);color:#fff;border-radius:18px;padding:22px;display:flex;justify-content:space-between;gap:15px;align-items:center}.head h1{margin:4px 0}.head p{margin:0;color:#dce5ff}.back{color:#fff;text-decoration:none;border:1px solid #ffffff55;border-radius:8px;padding:9px 12px;font-weight:800}.card{background:#fff;border:1px solid #d5deeb;border-radius:14px;padding:18px;margin-top:14px;box-shadow:0 8px 24px #17213d0d}.card h2{margin:0 0 6px}.muted{color:#718096;font-size:13px}.rule{display:flex;gap:12px;align-items:flex-start;padding:13px 0;border-bottom:1px solid #edf0f5}.rule:last-child{border-bottom:0}.rule input[type=checkbox]{width:20px;height:20px;margin-top:2px}.rule strong{display:block;margin-bottom:3px}.field{margin:14px 0}.field label{display:block;font-weight:800;font-size:12px;color:#536179;margin-bottom:6px}.field input,.field select,.field textarea{width:100%;padding:10px;border:1px solid #ccd6e5;border-radius:8px;font:inherit}.field textarea{min-height:115px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.save{background:#2878ff;color:white;border:0;border-radius:9px;padding:11px 15px;font-weight:900;cursor:pointer}.status{margin-left:10px;font-weight:800}.example{white-space:pre-wrap;background:#101a35;color:#e8efff;padding:14px;border-radius:10px;font-family:monospace}.ok{color:#16845b}.bad{color:#ad3148}@media(max-width:700px){.row{grid-template-columns:1fr}.head{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="head"><div><small>QA ALERT CONTROL</small><h1>Automation Rules</h1><p>Change the business rules here instead of changing code.</p></div><a class="back" href="/">← Pixel Office</a></div>
+<div class="card"><h2>Booking + documentation logic</h2><p class="muted">These rules control when documentation can be judged and which booking gets QA.</p>
+<div class="rule"><input id="suppress" type="checkbox"><div><strong>No booking = never flag missing documentation</strong><span class="muted">If no booking is found, the call is still transcribed and saved, but no missing-notes alert is created.</span></div></div>
+<div class="rule"><input id="saveAll" type="checkbox"><div><strong>Save every booking JSON</strong><span class="muted">When the same caller has multiple bookings, keep each booking separately under data/bookings.</span></div></div>
+<div class="rule"><input id="oneOnly" type="checkbox"><div><strong>QA only one matched booking</strong><span class="muted">Never QA two bookings from one call. The transcript must uniquely match one booking.</span></div></div>
+<div class="row"><div class="field"><label>Minimum booking-match confidence</label><input id="confidence" type="number" min="0" max="1" step="0.05"></div><div class="field"><label>If multiple bookings cannot be matched</label><select id="nomatch"><option value="needs_attention">Needs Attention - Booking Match</option><option value="hold">Hold without QA</option></select></div></div>
+</div>
+<div class="card"><h2>Automatic QA + Slack</h2>
+<div class="rule"><input id="autoQa" type="checkbox"><div><strong>Automatically QA after transcription</strong><span class="muted">Once Whisper finishes, match the booking and run QA automatically.</span></div></div>
+<div class="rule"><input id="slackIssue" type="checkbox"><div><strong>Send Slack only when QA finds an issue</strong><span class="muted">No Slack alert for clean calls or booking-not-found documentation.</span></div></div>
+<div class="field"><label>Slack issue template</label><textarea id="template"></textarea><div class="muted">Available: {itinerary}, {agent}, {call_center}, {process}</div></div>
+<div class="example" id="preview"></div>
+</div>
+<div class="card"><button class="save" id="save">Save Automation Rules</button><span class="status" id="status"></span></div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+async function load(){const r=await fetch('/api/automation-settings',{cache:'no-store'});if(r.status===401){location.href='/';return}const s=await r.json();$('suppress').checked=s.suppress_missing_docs_when_booking_not_found;$('saveAll').checked=s.save_all_booking_json;$('oneOnly').checked=s.qa_only_one_matched_booking;$('confidence').value=s.booking_match_min_confidence;$('nomatch').value=s.multi_booking_no_match_action;$('autoQa').checked=s.auto_qa_after_transcription;$('slackIssue').checked=s.slack_on_qa_issue;$('template').value=s.slack_alert_template;preview()}
+function preview(){let t=$('template').value||'';t=t.replaceAll('{itinerary}','H12345678').replaceAll('{agent}','Jane Doe').replaceAll('{call_center}','WNS').replaceAll('{process}','required cancellation process');$('preview').textContent=t}
+$('template').addEventListener('input',preview);
+$('save').onclick=async()=>{const payload={suppress_missing_docs_when_booking_not_found:$('suppress').checked,save_all_booking_json:$('saveAll').checked,qa_only_one_matched_booking:$('oneOnly').checked,booking_match_min_confidence:Number($('confidence').value||.75),multi_booking_no_match_action:$('nomatch').value,auto_qa_after_transcription:$('autoQa').checked,slack_on_qa_issue:$('slackIssue').checked,slack_alert_template:$('template').value};const r=await fetch('/api/automation-settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});$('status').textContent=r.ok?'Saved':'Could not save';$('status').className='status '+(r.ok?'ok':'bad');if(r.ok)setTimeout(()=>$('status').textContent='',2000)};
+load();
+</script></body></html>
