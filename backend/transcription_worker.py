@@ -126,7 +126,6 @@ def resolve_audio_path(json_path: Path, data: dict, call_id: str) -> Path | None
         except Exception:
             pass
 
-    # Fallback: collector filenames contain the Call ID.
     if call_id:
         try:
             for p in INBOX.rglob(f"*{call_id}*"):
@@ -183,33 +182,36 @@ def find_audio_for_row(row: sqlite3.Row) -> Path | None:
 
 
 def next_case() -> sqlite3.Row | None:
+    # Any case that still has audio and no transcript must be transcribed,
+    # regardless of an old/legacy status such as complete/completed.
     with db() as c:
         rows = c.execute(
             """
             SELECT * FROM cases
-            WHERE status IN ('queued','transcription_error')
-              AND COALESCE(transcript_text,'')=''
+            WHERE COALESCE(transcript_text,'')=''
+              AND status<>'transcribing'
             ORDER BY created_at ASC
-            LIMIT 50
+            LIMIT 200
             """
         ).fetchall()
     for row in rows:
         audio = find_audio_for_row(row)
-        if audio:
-            with db() as c:
-                now = utc_now()
-                c.execute(
-                    """
-                    UPDATE cases
-                    SET status='transcribing',audio_path=?,transcription_started_at=?,
-                        transcription_error=NULL,updated_at=?
-                    WHERE id=? AND status IN ('queued','transcription_error')
-                    """,
-                    (str(audio), now, now, row["id"]),
-                )
-                claimed = c.execute("SELECT * FROM cases WHERE id=?", (row["id"],)).fetchone()
-            if claimed and claimed["status"] == "transcribing":
-                return claimed
+        if not audio:
+            continue
+        with db() as c:
+            now = utc_now()
+            c.execute(
+                """
+                UPDATE cases
+                SET status='transcribing',audio_path=?,transcription_started_at=?,
+                    transcription_error=NULL,updated_at=?
+                WHERE id=? AND COALESCE(transcript_text,'')=''
+                """,
+                (str(audio), now, now, row["id"]),
+            )
+            claimed = c.execute("SELECT * FROM cases WHERE id=?", (row["id"],)).fetchone()
+        if claimed and claimed["status"] == "transcribing":
+            return claimed
     return None
 
 
@@ -217,10 +219,7 @@ def load_model():
     from faster_whisper import WhisperModel
 
     threads = max(2, (os.cpu_count() or 4) - 1)
-    kwargs = {
-        "device": DEVICE,
-        "compute_type": COMPUTE_TYPE,
-    }
+    kwargs = {"device": DEVICE, "compute_type": COMPUTE_TYPE}
     if DEVICE == "cpu":
         kwargs["cpu_threads"] = threads
     write_status(
@@ -522,7 +521,6 @@ def run_forever() -> None:
             write_status(state="error", last_error=error, message=error)
             time.sleep(5)
 
-    # Keep the lock file handle alive until process exit.
     _ = lock_handle
 
 
