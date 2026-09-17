@@ -21,6 +21,13 @@ if errorlevel 1 (
 
 python -m backend.repair_legacy_cases
 
+echo [QA ALERT] Checking for an older QA ALERT backend on port 8787...
+for /f %%P in ('powershell -NoProfile -Command "$p=(Get-NetTCPConnection -LocalPort 8787 -State Listen -ErrorAction SilentlyContinue).OwningProcess; if($p){$p}"') do (
+  echo [QA ALERT] Stopping stale backend process %%P...
+  powershell -NoProfile -Command "Stop-Process -Id %%P -Force -ErrorAction SilentlyContinue"
+)
+timeout /t 2 /nobreak >nul
+
 set "CF_CONFIG=%USERPROFILE%\.cloudflared\config.yml"
 
 where cloudflared >nul 2>nul
