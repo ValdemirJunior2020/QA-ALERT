@@ -9,20 +9,22 @@ from pathlib import Path
 
 import requests
 
-from backend.booking_rules import alert_text, booking_documentation_text, db as booking_db, ensure_booking_schema, read_automation_settings
+from backend.booking_rules import alert_text, booking_documentation_text, ensure_booking_schema, read_automation_settings
+from backend.knowledge_loader import load_knowledge_text
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 DB = DATA / "qa-alert.db"
-KNOWLEDGE = ROOT / "knowledge"
 STATUS_FILE = DATA / "qa-worker-status.json"
 RESULTS = DATA / "qa-results"
 RESULTS.mkdir(parents=True, exist_ok=True)
-KNOWLEDGE.mkdir(parents=True, exist_ok=True)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 POLL_SECONDS = max(2, int(os.getenv("QA_WORKER_POLL_SECONDS", "4")))
+
+BEHAVIOR_SOURCE = "QA Behavior Safeguard"
+BEHAVIOR_PROCESS = "Professional customer service conduct and helpfulness"
 
 
 def utc_now() -> str:
@@ -59,7 +61,7 @@ def _ollama_json(system: str, payload: dict) -> dict:
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ],
-        "options": {"temperature": 0.1},
+        "options": {"temperature": 0.05},
     }
     r = requests.post(f"{OLLAMA_BASE_URL}/api/chat", json=body, timeout=180)
     r.raise_for_status()
@@ -68,17 +70,7 @@ def _ollama_json(system: str, payload: dict) -> dict:
 
 
 def _knowledge_text() -> str:
-    chunks: list[str] = []
-    for p in sorted(KNOWLEDGE.rglob("*")):
-        if not p.is_file():
-            continue
-        try:
-            if p.suffix.lower() in {".txt", ".md", ".json"}:
-                text = p.read_text(encoding="utf-8", errors="ignore")
-                chunks.append(f"\n--- {p.name} ---\n{text[:100000]}")
-        except Exception:
-            continue
-    return "\n".join(chunks)
+    return load_knowledge_text(max_chars_per_file=160000)
 
 
 def _booking_candidates(case_id: int) -> list[dict]:
@@ -103,11 +95,7 @@ def match_one_booking(case_row: sqlite3.Row) -> tuple[dict | None, float, str]:
 
     compact = []
     for c in candidates:
-        d = c["data"]
-        compact.append({
-            "itinerary": c["row"].get("itinerary") if isinstance(c["row"], dict) else c["row"]["itinerary"],
-            "booking": d,
-        })
+        compact.append({"itinerary": c["row"]["itinerary"], "booking": c["data"]})
 
     system = (
         "You match one hotel customer-service call transcript to exactly one booking. "
@@ -135,32 +123,118 @@ def _save_match(case_row, chosen, confidence: float, status: str):
         c.execute("UPDATE booking_candidates SET is_matched=0,match_confidence=NULL WHERE case_id=?", (case_row["id"],))
         if chosen:
             c.execute("UPDATE booking_candidates SET is_matched=1,match_confidence=? WHERE id=?", (confidence, chosen["row"]["id"]))
-            c.execute("""
+            c.execute(
+                """
                 UPDATE cases SET itinerary=?,matched_booking_path=?,booking_match_status=?,booking_match_confidence=?,updated_at=? WHERE id=?
-            """, (chosen["row"]["itinerary"], chosen["row"]["booking_json_path"], status, confidence, now, case_row["id"]))
+                """,
+                (chosen["row"]["itinerary"], chosen["row"]["booking_json_path"], status, confidence, now, case_row["id"]),
+            )
         else:
-            c.execute("UPDATE cases SET booking_match_status=?,booking_match_confidence=?,status='needs_attention',finding=?,updated_at=? WHERE id=?",
-                      (status, confidence, "Multiple bookings were found, but one unique booking could not be matched to the call. QA was not run on multiple bookings.", now, case_row["id"]))
+            c.execute(
+                "UPDATE cases SET booking_match_status=?,booking_match_confidence=?,status='needs_attention',finding=?,updated_at=? WHERE id=?",
+                (
+                    status,
+                    confidence,
+                    "Multiple bookings were found, but one unique booking could not be matched to the call. QA was not run on multiple bookings.",
+                    now,
+                    case_row["id"],
+                ),
+            )
+
+
+def _conduct_qa_case(case_row: sqlite3.Row) -> dict:
+    write_status(
+        state="ollama_qa",
+        current_call_id=case_row["call_id"],
+        current_agent=case_row["agent"],
+        message=f"Checking customer-service behavior for {case_row['call_id']}",
+    )
+    system = (
+        "You are a customer-service conduct QA reviewer. Review the transcript even when no booking exists. "
+        "Flag ONLY clear, transcript-supported agent conduct problems. Serious conduct problems include: rude or disrespectful language; refusing to help when help could reasonably be provided; arguing with the guest; profanity directed at or around the guest; mocking, laughing at, belittling, or insulting the guest; intentionally disconnecting or announcing a hang-up to avoid helping; clearly dismissive behavior; or abandoning the interaction without reasonable assistance or explanation. "
+        "Do not invent tone, speaker identity, or intent that the transcript does not support. Normal policy enforcement, saying no when required, transferring appropriately, or ending an abusive call with explanation is not automatically a violation. "
+        "Return JSON only with keys: issue_found(bool), score(null), severity(info|warning|critical), guest_request, agent_action, process, matrix_source, finding, evidence_excerpt. "
+        f"If a conduct issue is found, process must be '{BEHAVIOR_PROCESS}' and matrix_source must be '{BEHAVIOR_SOURCE}'. "
+        "Use warning for clearly unhelpful/dismissive behavior and critical for direct insults, profanity toward the guest, mocking, or clear intentional abandonment/disconnect."
+    )
+    return _ollama_json(system, {"transcript": case_row["transcript_text"]})
 
 
 def _qa_case(case_row: sqlite3.Row, booking: dict) -> dict:
-    write_status(state="matrix_check", current_call_id=case_row["call_id"], current_agent=case_row["agent"], message=f"Checking Matrix sources for {case_row['call_id']}")
+    write_status(
+        state="matrix_check",
+        current_call_id=case_row["call_id"],
+        current_agent=case_row["agent"],
+        message=f"Checking rules for {case_row['call_id']}",
+    )
     knowledge = _knowledge_text()
     if not knowledge.strip():
-        raise RuntimeError("QA knowledge is empty. Put the QA Form/Matrix/update source material in the knowledge folder.")
+        raise RuntimeError("QA knowledge is empty. Upload the QA Form / Rubric, Original Matrix, and Matrix update emails sent.")
 
     system = (
         "You are a strict hotel call QA engine. Evaluate ONLY the single matched booking provided. "
-        "The QA Form/Rubric controls scoring. Process-update material overrides older Matrix instructions when conflicting. "
-        "Never invent a requirement. If the evidence is insufficient, do not fail the agent. "
+        "The QA Form/Rubric controls scoring. Matrix update emails sent override older Original Matrix instructions when conflicting. "
+        "Never invent a Matrix requirement. If process evidence is insufficient, do not fail the agent for that process. "
+        "Independently flag clear customer-service conduct problems even if the Matrix does not specifically mention them: rude/disrespectful language, unreasonable refusal to help, arguing, profanity, mocking/belittling, clear intentional disconnect to avoid helping, extreme dismissiveness, or abandoning the interaction without reasonable assistance. "
+        f"For a conduct-only issue, use process='{BEHAVIOR_PROCESS}' and matrix_source='{BEHAVIOR_SOURCE}'. "
         "Return JSON only with: issue_found(bool), score(number|null), severity(info|warning|critical), guest_request, agent_action, process, matrix_source, finding, evidence_excerpt."
     )
-    write_status(state="ollama_qa", current_call_id=case_row["call_id"], current_agent=case_row["agent"], message=f"Running Ollama QA for {case_row['call_id']}")
-    return _ollama_json(system, {
-        "transcript": case_row["transcript_text"],
-        "booking": booking,
-        "source_of_truth": knowledge,
-    })
+    write_status(
+        state="ollama_qa",
+        current_call_id=case_row["call_id"],
+        current_agent=case_row["agent"],
+        message=f"Analyzing {case_row['call_id']}",
+    )
+    return _ollama_json(
+        system,
+        {"transcript": case_row["transcript_text"], "booking": booking, "source_of_truth": knowledge},
+    )
+
+
+def _save_qa_result(row: sqlite3.Row, qa: dict, matched_booking: dict | None, no_booking: bool = False) -> tuple[bool, Path]:
+    now = utc_now()
+    result_path = RESULTS / f"{row['call_id']}.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "call_id": row["call_id"],
+                "booking_found": not no_booking,
+                "matched_booking": matched_booking,
+                "qa": qa,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    issue = bool(qa.get("issue_found"))
+    severity = str(qa.get("severity") or ("warning" if issue else "info"))
+    finding = str(qa.get("finding") or "").strip() or None
+    final_status = "needs_attention" if issue else ("completed_no_booking" if no_booking else "completed")
+    with db() as c:
+        c.execute(
+            """
+            UPDATE cases SET guest_request=?,agent_action=?,score=?,severity=?,finding=?,qa_process=?,qa_matrix_source=?,qa_result_json=?,
+                evidence_excerpt=?,status=?,missing_notes=CASE WHEN ? THEN 0 ELSE missing_notes END,updated_at=? WHERE id=?
+            """,
+            (
+                qa.get("guest_request"),
+                qa.get("agent_action"),
+                qa.get("score"),
+                severity,
+                finding,
+                qa.get("process"),
+                qa.get("matrix_source"),
+                str(result_path),
+                qa.get("evidence_excerpt"),
+                final_status,
+                1 if no_booking else 0,
+                now,
+                row["id"],
+            ),
+        )
+    return issue, result_path
 
 
 def _send_issue_slack(case_row, qa: dict):
@@ -176,8 +250,20 @@ def _send_issue_slack(case_row, qa: dict):
     if not recipient or not token:
         return False
 
-    text = alert_text(case_row["itinerary"], case_row["agent"], case_row["call_center"], qa.get("process") or "Unspecified process")
+    source = str(qa.get("matrix_source") or "").strip()
+    process = str(qa.get("process") or "Unspecified process").strip()
+    if source == BEHAVIOR_SOURCE:
+        text = (
+            "Attention\n"
+            f"Booking: {case_row['itinerary'] or 'N/A'}\n"
+            f"Agent: {case_row['agent'] or 'N/A'} from {case_row['call_center'] or 'N/A'} did not follow this process: \"{process}\".\n"
+            f"Source: {BEHAVIOR_SOURCE}."
+        )
+    else:
+        text = alert_text(case_row["itinerary"], case_row["agent"], case_row["call_center"], process)
+
     from slack_sdk import WebClient
+
     client = WebClient(token=token)
     channel = recipient
     if recipient.startswith(("U", "W")):
@@ -186,64 +272,65 @@ def _send_issue_slack(case_row, qa: dict):
     return True
 
 
+def _mark_slack_sent(case_id: int):
+    now = utc_now()
+    with db() as c:
+        c.execute("UPDATE cases SET slack_alert_sent_at=?,updated_at=? WHERE id=?", (now, now, case_id))
+
+
 def process_case(row: sqlite3.Row):
     settings = read_automation_settings()
     if not settings["auto_qa_after_transcription"]:
         return
 
-    # Booking not found: save transcript, but do NOT create missing-documentation alerts.
+    # Every saved transcript gets QA. No booking means behavior-only QA.
     if int(row["booking_found"] or 0) == 0:
-        with db() as c:
-            c.execute("UPDATE cases SET missing_notes=0,severity='info',finding=NULL,status='completed_no_booking',updated_at=? WHERE id=?", (utc_now(), row["id"]))
+        qa = _conduct_qa_case(row)
+        issue, _ = _save_qa_result(row, qa, None, no_booking=True)
+        if issue:
+            with db() as c:
+                fresh = c.execute("SELECT * FROM cases WHERE id=?", (row["id"],)).fetchone()
+            if fresh and _send_issue_slack(fresh, qa):
+                _mark_slack_sent(row["id"])
         return
 
-    write_status(state="booking_matching", current_call_id=row["call_id"], current_agent=row["agent"], message=f"Matching booking for {row['call_id']}")
+    write_status(
+        state="booking_matching",
+        current_call_id=row["call_id"],
+        current_agent=row["agent"],
+        message=f"Matching booking for {row['call_id']}",
+    )
     chosen, confidence, match_status = match_one_booking(row)
     _save_match(row, chosen, confidence, match_status)
     if not chosen:
         return
 
     docs = booking_documentation_text(chosen["data"])
-    # Documentation is evaluated only on the ONE matched booking.
     with db() as c:
         c.execute("UPDATE cases SET missing_notes=? WHERE id=?", (0 if docs.strip() else 1, row["id"]))
 
     qa = _qa_case(row, chosen["data"])
-    now = utc_now()
-    result_path = RESULTS / f"{row['call_id']}.json"
-    result_path.write_text(json.dumps({"call_id": row["call_id"], "matched_booking": chosen["data"], "qa": qa}, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    issue = bool(qa.get("issue_found"))
-    severity = str(qa.get("severity") or ("warning" if issue else "info"))
-    finding = str(qa.get("finding") or "") or None
-    with db() as c:
-        c.execute("""
-            UPDATE cases SET guest_request=?,agent_action=?,score=?,severity=?,finding=?,qa_process=?,qa_matrix_source=?,qa_result_json=?,
-                evidence_excerpt=?,status=?,updated_at=? WHERE id=?
-        """, (
-            qa.get("guest_request"), qa.get("agent_action"), qa.get("score"), severity, finding,
-            qa.get("process"), qa.get("matrix_source"), str(result_path), qa.get("evidence_excerpt"),
-            "needs_attention" if issue else "completed", now, row["id"]
-        ))
-
+    issue, _ = _save_qa_result(row, qa, chosen["data"], no_booking=False)
     if issue:
         with db() as c:
             fresh = c.execute("SELECT * FROM cases WHERE id=?", (row["id"],)).fetchone()
-        if _send_issue_slack(fresh, qa):
-            with db() as c:
-                c.execute("UPDATE cases SET slack_alert_sent_at=?,updated_at=? WHERE id=?", (utc_now(), utc_now(), row["id"]))
+        if fresh and _send_issue_slack(fresh, qa):
+            _mark_slack_sent(row["id"])
 
 
 def next_case():
     ensure_booking_schema()
     with db() as c:
-        return c.execute("""
+        return c.execute(
+            """
             SELECT * FROM cases
             WHERE status IN ('transcribed_audio_deleted','transcribed')
+              AND COALESCE(transcript_text,'')<>''
               AND COALESCE(qa_result_json,'')=''
             ORDER BY COALESCE(transcription_completed_at,updated_at) ASC
             LIMIT 1
-        """).fetchone()
+            """
+        ).fetchone()
 
 
 def main():
@@ -256,7 +343,12 @@ def main():
                 write_status(state="idle", message="Waiting for transcribed calls")
                 time.sleep(POLL_SECONDS)
                 continue
-            write_status(state="qa_running", current_call_id=row["call_id"], current_agent=row["agent"], message=f"Matching booking and QA'ing {row['call_id']}")
+            write_status(
+                state="qa_running",
+                current_call_id=row["call_id"],
+                current_agent=row["agent"],
+                message=f"Starting QA for {row['call_id']}",
+            )
             try:
                 process_case(row)
                 with db() as c:
@@ -268,11 +360,14 @@ def main():
                     last_completed_at=utc_now() if actual_completed else None,
                     current_call_id=None,
                     current_agent=None,
-                    message="QA completed" if actual_completed else "QA cycle finished without a completed QA",
+                    message="QA completed" if actual_completed else "QA cycle finished",
                 )
             except Exception as exc:
                 with db() as c:
-                    c.execute("UPDATE cases SET status='qa_error',finding=?,updated_at=? WHERE id=?", (f"QA worker error: {exc}", utc_now(), row["id"]))
+                    c.execute(
+                        "UPDATE cases SET status='qa_error',finding=?,updated_at=? WHERE id=?",
+                        (f"QA worker error: {exc}", utc_now(), row["id"]),
+                    )
                 write_status(state="error", current_call_id=row["call_id"], error=str(exc), message="QA worker error")
                 time.sleep(POLL_SECONDS)
         except Exception as exc:
