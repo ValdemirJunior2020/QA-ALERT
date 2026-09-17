@@ -12,7 +12,10 @@ const HOP_BY_HOP = new Set([
 ]);
 
 function cleanBase(value) {
-  return String(value || "").trim().replace(/\/+$/, "");
+  let base = String(value || "").trim().replace(/\/+$/, "");
+  if (!base) return "";
+  if (!/^https?:\/\//i.test(base)) base = `https://${base}`;
+  return base;
 }
 
 export default async (req) => {
@@ -24,7 +27,32 @@ export default async (req) => {
     );
   }
 
+  let backendUrl;
+  try {
+    backendUrl = new URL(backend);
+  } catch {
+    return Response.json(
+      {
+        detail: "QA_ALERT_BACKEND_URL is invalid.",
+        expected: "Use a full Cloudflare backend address such as https://qa-api.hotelplannerqa.com",
+      },
+      { status: 503 },
+    );
+  }
+
   const incomingUrl = new URL(req.url);
+
+  // Prevent an accidental proxy loop if the Netlify frontend domain is entered
+  // as the local QA backend address.
+  if (backendUrl.hostname === incomingUrl.hostname) {
+    return Response.json(
+      {
+        detail: "QA_ALERT_BACKEND_URL points back to this Netlify site. Use a separate Cloudflare Tunnel hostname for the local backend, for example https://qa-api.hotelplannerqa.com.",
+      },
+      { status: 503 },
+    );
+  }
+
   const target = `${backend}${incomingUrl.pathname}${incomingUrl.search}`;
 
   const headers = new Headers(req.headers);
@@ -62,6 +90,7 @@ export default async (req) => {
     return Response.json(
       {
         detail: "QA ALERT backend is unreachable through the configured Cloudflare URL.",
+        backend,
         error: String(error?.message || error),
       },
       { status: 502 },
