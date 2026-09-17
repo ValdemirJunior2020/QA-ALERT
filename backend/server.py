@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from fastapi import HTTPException
+from fastapi import File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 import backend.app as app_module
@@ -14,6 +14,7 @@ from backend.booking_rules import (
     read_automation_settings,
     write_automation_settings,
 )
+from backend.knowledge_loader import KNOWLEDGE, source_status
 from backend.transcription_worker import STATUS_FILE, TRANSCRIPTS, ensure_schema
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -64,6 +65,28 @@ async def put_automation_settings(payload: dict):
     return write_automation_settings(payload)
 
 
+@app.get("/api/knowledge/status")
+def knowledge_status():
+    return source_status()
+
+
+@app.post("/api/knowledge/upload")
+async def knowledge_upload(file: UploadFile = File(...)):
+    filename = Path(file.filename or "").name
+    ext = Path(filename).suffix.lower()
+    if ext not in {".xlsx", ".xlsm", ".docx", ".txt", ".md", ".json"}:
+        raise HTTPException(400, "Use XLSX, XLSM, DOCX, TXT, MD, or JSON")
+    if not filename:
+        raise HTTPException(400, "File name is missing")
+    KNOWLEDGE.mkdir(parents=True, exist_ok=True)
+    target = KNOWLEDGE / filename
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:
+        raise HTTPException(400, "Knowledge file is larger than 50 MB")
+    target.write_bytes(content)
+    return {"ok": True, "saved": filename, "status": source_status()}
+
+
 @app.get("/api/workers")
 def worker_status():
     with db() as c:
@@ -90,6 +113,7 @@ def worker_status():
     return {
         "whisper": _worker_file_status(),
         "qa": _qa_worker_status(),
+        "knowledge": source_status(),
         "counts": {
             "queued": queued,
             "transcribing": transcribing,
