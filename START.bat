@@ -48,7 +48,7 @@ echo [QA ALERT] Starting local Whisper transcription worker...
 start "QA ALERT Whisper" /min "%CD%\.venv\Scripts\python.exe" -m backend.transcription_pipeline
 
 echo [QA ALERT] Starting automatic booking match + QA worker...
-start "QA ALERT QA Worker" /min "%CD%\.venv\Scripts\python.exe" -m backend.qa_pipeline
+start "QA ALERT QA Worker" /min "%CD%\.venv\Scripts\python.exe" -m backend.qa_pipeline_bootstrap
 
 start "QA ALERT" http://127.0.0.1:8787
 python -m uvicorn backend.live_server:app --host 127.0.0.1 --port 8787
