@@ -26,7 +26,7 @@ DATA.mkdir(exist_ok=True)
 EXPORTS.mkdir(exist_ok=True)
 INBOX.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="QA ALERT", version="0.2.0")
+app = FastAPI(title="QA ALERT", version="0.3.0")
 
 DEFAULTS = {
     "scan_interval_minutes": "5",
@@ -67,6 +67,16 @@ def init_db():
           created_at TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+        CREATE TABLE IF NOT EXISTS case_reviews(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          case_id INTEGER NOT NULL,
+          action TEXT NOT NULL,
+          manager_note TEXT,
+          correct_procedure TEXT,
+          created_at TEXT NOT NULL,
+          FOREIGN KEY(case_id) REFERENCES cases(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_reviews_case_id ON case_reviews(case_id);
         """)
         for k,v in DEFAULTS.items():
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)",(k,v))
@@ -88,6 +98,11 @@ class Settings(BaseModel):
 class SlackTest(BaseModel):
     recipient_id:Optional[str]=None
     recipient_name:Optional[str]=None
+
+class AttentionResolution(BaseModel):
+    action:str
+    manager_note:str=""
+    correct_procedure:str=""
 
 
 def read_settings():
@@ -143,7 +158,6 @@ def ingest_json_file(path: Path):
 
     call_id = str(_first(data, "call_id", "callId", "id", default="")).strip()
     if not call_id:
-        # Do not silently drop a call just because one metadata field is missing.
         call_id = f"FILE-{path.stem}"
 
     agent = str(_first(data, "agent_name", "agent", default="N/A") or "N/A")
@@ -193,8 +207,6 @@ def ingest_json_file(path: Path):
 def scan_inbox_once():
     INBOX.mkdir(parents=True, exist_ok=True)
     imported = 0
-    # Collector versions have saved both directly in QA-CALLS and in subfolders,
-    # so scan recursively and dedupe by call_id in SQLite.
     for path in sorted(INBOX.rglob("*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0):
         if ingest_json_file(path):
             imported += 1
@@ -213,8 +225,6 @@ def inbox_watcher():
 
 @app.on_event("startup")
 def start_inbox_watcher():
-    # Fast first pass so a call that already exists before START.bat launches
-    # appears in the dashboard immediately.
     try:
         scan_inbox_once()
     except Exception as exc:
@@ -280,6 +290,64 @@ def test_slack(payload:SlackTest):
 def rescan_inbox():
     return {"ok": True, "imported": scan_inbox_once(), "inbox": str(INBOX)}
 
+@app.get("/api/cases/attention")
+def attention_cases():
+    with db() as c:
+        rows=c.execute(
+            """
+            SELECT id,call_id,itinerary,agent,call_center,caller_number,duration_seconds,
+                   status,severity,finding,missing_notes,created_at,updated_at
+            FROM cases
+            WHERE missing_notes=1 OR severity='critical' OR status='needs_attention'
+            ORDER BY CASE WHEN severity='critical' THEN 0 ELSE 1 END, updated_at DESC
+            """
+        ).fetchall()
+    return {"cases":[dict(r) for r in rows]}
+
+@app.post("/api/cases/{case_id}/attention-resolution")
+def resolve_attention(case_id:int, payload:AttentionResolution):
+    action=payload.action.strip().lower()
+    allowed={"clear_missing_notes","false_positive","keep_attention"}
+    if action not in allowed:
+        raise HTTPException(400,"Unknown attention action")
+
+    now=datetime.now(timezone.utc).isoformat()
+    with db() as c:
+        row=c.execute("SELECT * FROM cases WHERE id=?",(case_id,)).fetchone()
+        if not row:
+            raise HTTPException(404,"Case not found")
+
+        c.execute(
+            "INSERT INTO case_reviews(case_id,action,manager_note,correct_procedure,created_at) VALUES (?,?,?,?,?)",
+            (case_id,action,payload.manager_note.strip(),payload.correct_procedure.strip(),now),
+        )
+
+        finding=row["finding"] or ""
+        note=payload.manager_note.strip()
+        if note:
+            finding=(finding+"\nManager review: "+note).strip()
+
+        if action=="clear_missing_notes":
+            severity="info" if row["severity"]=="warning" else row["severity"]
+            c.execute(
+                "UPDATE cases SET missing_notes=0,severity=?,finding=?,updated_at=? WHERE id=?",
+                (severity,finding,now,case_id),
+            )
+        elif action=="false_positive":
+            severity="info" if row["severity"]=="warning" else row["severity"]
+            c.execute(
+                "UPDATE cases SET missing_notes=0,severity=?,status='reviewed',finding=?,updated_at=? WHERE id=?",
+                (severity,finding,now,case_id),
+            )
+        else:
+            c.execute(
+                "UPDATE cases SET status='needs_attention',finding=?,updated_at=? WHERE id=?",
+                (finding,now,case_id),
+            )
+
+        updated=c.execute("SELECT * FROM cases WHERE id=?",(case_id,)).fetchone()
+    return {"ok":True,"case":dict(updated)}
+
 @app.get("/api/dashboard")
 def dashboard():
     with db() as c:
@@ -287,7 +355,8 @@ def dashboard():
         active=c.execute("SELECT COUNT(*) n FROM cases WHERE status IN ('queued','collecting','transcribing','qa_running')").fetchone()["n"]
         critical=c.execute("SELECT COUNT(*) n FROM cases WHERE severity='critical'").fetchone()["n"]
         missing=c.execute("SELECT COUNT(*) n FROM cases WHERE missing_notes=1").fetchone()["n"]
-    return {"total":total,"active":active,"critical":critical,"missing_notes":missing}
+        attention=c.execute("SELECT COUNT(*) n FROM cases WHERE missing_notes=1 OR severity='critical' OR status='needs_attention'").fetchone()["n"]
+    return {"total":total,"active":active,"critical":critical,"missing_notes":missing,"attention":attention}
 
 @app.get("/api/export.xlsx")
 def export_excel():
