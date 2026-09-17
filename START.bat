@@ -39,4 +39,4 @@ echo [QA ALERT] Starting local Whisper transcription worker...
 start "QA ALERT Whisper" /min "%CD%\.venv\Scripts\python.exe" -m backend.transcription_worker
 
 start "QA ALERT" http://127.0.0.1:8787
-python -m uvicorn backend.app:app --host 127.0.0.1 --port 8787
+python -m uvicorn backend.server:app --host 127.0.0.1 --port 8787
