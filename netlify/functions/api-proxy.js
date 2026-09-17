@@ -51,7 +51,6 @@ export default async (req) => {
   }
 
   const incomingUrl = new URL(req.url);
-
   if (backendUrl.hostname === incomingUrl.hostname) {
     return Response.json(
       {
@@ -63,7 +62,6 @@ export default async (req) => {
 
   const backendPath = getBackendPath(incomingUrl.pathname);
   const target = `${backend}${backendPath}${incomingUrl.search}`;
-
   const headers = new Headers(req.headers);
   for (const key of HOP_BY_HOP) headers.delete(key);
 
@@ -74,22 +72,14 @@ export default async (req) => {
     headers.set("cf-access-client-secret", cfClientSecret);
   }
 
-  const init = {
-    method: req.method,
-    headers,
-    redirect: "manual",
-  };
-
-  if (!["GET", "HEAD"].includes(req.method)) {
-    init.body = await req.arrayBuffer();
-  }
+  const init = { method: req.method, headers, redirect: "manual" };
+  if (!["GET", "HEAD"].includes(req.method)) init.body = await req.arrayBuffer();
 
   try {
     const response = await fetch(target, init);
     const responseHeaders = new Headers(response.headers);
     for (const key of HOP_BY_HOP) responseHeaders.delete(key);
-    responseHeaders.delete("set-cookie");
-
+    // Keep Set-Cookie so the QA ALERT HttpOnly login session reaches the browser.
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
@@ -107,6 +97,4 @@ export default async (req) => {
   }
 };
 
-export const config = {
-  path: "/api/*",
-};
+export const config = { path: "/api/*" };
