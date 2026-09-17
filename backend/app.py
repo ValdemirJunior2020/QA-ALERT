@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -18,10 +21,12 @@ DATA = ROOT / "data"
 EXPORTS = DATA / "exports"
 DB = DATA / "qa-alert.db"
 FRONTEND = ROOT / "frontend" / "index.html"
+INBOX = Path.home() / "Downloads" / "QA-CALLS"
 DATA.mkdir(exist_ok=True)
 EXPORTS.mkdir(exist_ok=True)
+INBOX.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="QA ALERT", version="0.1.0")
+app = FastAPI(title="QA ALERT", version="0.2.0")
 
 DEFAULTS = {
     "scan_interval_minutes": "5",
@@ -102,6 +107,121 @@ def read_settings():
     }
 
 
+def _first(data, *keys, default=None):
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
+def _as_int(value, default=0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return int(value)
+        text = str(value).strip()
+        if ":" in text:
+            parts = [int(p) for p in text.split(":")]
+            if len(parts) == 2:
+                return parts[0] * 60 + parts[1]
+            if len(parts) == 3:
+                return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        return int(float(text))
+    except Exception:
+        return default
+
+
+def ingest_json_file(path: Path):
+    try:
+        with path.open("r", encoding="utf-8-sig") as f:
+            data = json.load(f)
+    except Exception as exc:
+        print(f"[QA ALERT] Could not read {path.name}: {exc}")
+        return False
+
+    call_id = str(_first(data, "call_id", "callId", "id", default="")).strip()
+    if not call_id:
+        # Do not silently drop a call just because one metadata field is missing.
+        call_id = f"FILE-{path.stem}"
+
+    agent = str(_first(data, "agent_name", "agent", default="N/A") or "N/A")
+    center = str(_first(data, "call_center", "center", default="N/A") or "N/A")
+    caller = str(_first(data, "caller_number", "phone", "caller", default="N/A") or "N/A")
+    duration = _as_int(_first(data, "duration_seconds", "call_length_seconds", "duration", "call_length", default=0))
+
+    booking = data.get("booking_lookup") or {}
+    if not isinstance(booking, dict):
+        booking = {}
+    itinerary = _first(data, "itinerary", default=None) or _first(booking, "itinerary", default=None) or "N/A"
+
+    docs = _first(data, "documentation", "notes", "booking_notes", default=None)
+    if isinstance(docs, list):
+        docs = "\n".join(str(x) for x in docs if x)
+    missing_notes = 0 if (docs and str(docs).strip()) else 1
+
+    now = datetime.now(timezone.utc).isoformat()
+    finding = None
+    if missing_notes:
+        finding = "Call imported from QA-CALLS. No documentation/notes were found in the collector JSON."
+    elif itinerary == "N/A":
+        finding = "Call imported from QA-CALLS. Booking details were not available from the collector."
+
+    with db() as c:
+        existing = c.execute("SELECT id FROM cases WHERE call_id=?", (call_id,)).fetchone()
+        if existing:
+            return False
+        c.execute(
+            """
+            INSERT INTO cases(
+              call_id,itinerary,agent,call_center,caller_number,duration_seconds,
+              status,severity,finding,missing_notes,created_at,updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                call_id, str(itinerary), agent, center, caller, duration,
+                "queued", "warning" if missing_notes else "info", finding,
+                missing_notes, now, now,
+            ),
+        )
+
+    print(f"[QA ALERT] Imported call {call_id} from {path.name}")
+    return True
+
+
+def scan_inbox_once():
+    INBOX.mkdir(parents=True, exist_ok=True)
+    imported = 0
+    # Collector versions have saved both directly in QA-CALLS and in subfolders,
+    # so scan recursively and dedupe by call_id in SQLite.
+    for path in sorted(INBOX.rglob("*.json"), key=lambda p: p.stat().st_mtime if p.exists() else 0):
+        if ingest_json_file(path):
+            imported += 1
+    return imported
+
+
+def inbox_watcher():
+    print(f"[QA ALERT] Watching inbox: {INBOX}")
+    while True:
+        try:
+            scan_inbox_once()
+        except Exception as exc:
+            print(f"[QA ALERT] Inbox scan error: {exc}")
+        time.sleep(5)
+
+
+@app.on_event("startup")
+def start_inbox_watcher():
+    # Fast first pass so a call that already exists before START.bat launches
+    # appears in the dashboard immediately.
+    try:
+        scan_inbox_once()
+    except Exception as exc:
+        print(f"[QA ALERT] Initial inbox scan error: {exc}")
+    threading.Thread(target=inbox_watcher, daemon=True, name="qa-alert-inbox").start()
+
+
 def slack_client():
     token=os.getenv("SLACK_BOT_TOKEN","").strip()
     if not token:
@@ -131,7 +251,13 @@ def home():
     return FileResponse(FRONTEND)
 
 @app.get("/api/health")
-def health(): return {"ok":True,"time":datetime.now(timezone.utc).isoformat()}
+def health():
+    return {
+        "ok":True,
+        "time":datetime.now(timezone.utc).isoformat(),
+        "inbox":str(INBOX),
+        "inbox_exists":INBOX.exists(),
+    }
 
 @app.get("/api/settings")
 def get_settings():
@@ -149,6 +275,10 @@ def put_settings(payload:Settings):
 def test_slack(payload:SlackTest):
     s=read_settings(); rid=(payload.recipient_id or s["slack_recipient_id"]).strip(); name=(payload.recipient_name or s["slack_recipient_name"]).strip()
     return send_slack(f"QA ALERT test message\nRecipient: {name or 'configured recipient'}\nStatus: Slack connection is working.",rid)
+
+@app.post("/api/inbox/rescan")
+def rescan_inbox():
+    return {"ok": True, "imported": scan_inbox_once(), "inbox": str(INBOX)}
 
 @app.get("/api/dashboard")
 def dashboard():
