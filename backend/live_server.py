@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 
 from backend.export_server import app, db
 
@@ -16,8 +20,6 @@ def _ensure_system_attention_schema() -> None:
 def _cleanup_false_no_booking_attention() -> None:
     """Repair legacy no-booking attention rows without hiding real conduct issues."""
     with db() as c:
-        # Convert old Slack/API failures that were incorrectly stored as QA criticals
-        # into visible INFO-level system attention. Do not erase the QA result.
         c.execute(
             """
             UPDATE cases
@@ -38,8 +40,6 @@ def _cleanup_false_no_booking_attention() -> None:
             """
         )
 
-        # Old no-booking INFO rows are false attention rows, EXCEPT explicit
-        # system/Slack errors which must remain visible.
         c.execute(
             """
             UPDATE cases
@@ -113,6 +113,55 @@ def _attention_where() -> str:
         AND LOWER(COALESCE(severity,'info')) IN ('warning','critical')
       )
     """
+
+
+@app.get("/api/slack/status")
+def slack_status():
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    with db() as c:
+        raw = {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM settings")}
+    recipient = raw.get("slack_recipient_id", "").strip()
+    enabled = raw.get("slack_enabled", "false") == "true"
+    if not token:
+        return {
+            "ok": False,
+            "enabled": enabled,
+            "token_configured": False,
+            "recipient_id": recipient,
+            "error": "missing_token",
+            "message": "SLACK_BOT_TOKEN is missing from .env",
+        }
+    try:
+        result = WebClient(token=token).auth_test()
+        return {
+            "ok": True,
+            "enabled": enabled,
+            "token_configured": True,
+            "recipient_id": recipient,
+            "team": result.get("team"),
+            "user": result.get("user"),
+            "bot_id": result.get("bot_id"),
+            "message": "Slack token is valid.",
+        }
+    except SlackApiError as exc:
+        error = exc.response.get("error", "unknown_error")
+        return {
+            "ok": False,
+            "enabled": enabled,
+            "token_configured": True,
+            "recipient_id": recipient,
+            "error": error,
+            "message": f"Slack authentication failed: {error}",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "enabled": enabled,
+            "token_configured": True,
+            "recipient_id": recipient,
+            "error": type(exc).__name__,
+            "message": str(exc),
+        }
 
 
 @app.middleware("http")
