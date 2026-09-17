@@ -8,6 +8,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "data" / "qa-alert.db"
 
+REPORT_URL = "https://qa-alert.netlify.app/"
+REPORT_LOGIN = "qateam2026"
+REPORT_FOOTER = (
+    "\n\nQA Report: " + REPORT_URL +
+    "\nLogin: " + REPORT_LOGIN +
+    "\nPassword: use the QA ALERT password shared separately."
+)
+
 
 def database_ready() -> bool:
     try:
@@ -25,7 +33,7 @@ while not database_ready():
     time.sleep(2)
 
 import backend.qa_worker as qa_worker
-from backend.booking_rules import read_automation_settings
+from backend.booking_rules import alert_text, read_automation_settings
 from backend.knowledge_loader import load_knowledge_text
 
 # Keep private Excel/Word Matrix files local and load them automatically.
@@ -83,20 +91,59 @@ def _urgent_next_case():
 
 qa_worker.next_case = _urgent_next_case
 
+
+def _slack_destination():
+    with qa_worker.db() as c:
+        raw = {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM settings")}
+    if raw.get("slack_enabled", "false") != "true":
+        return None, None
+    recipient = raw.get("slack_recipient_id", "").strip()
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not recipient or not token:
+        return None, None
+    return recipient, token
+
+
+def _post_slack(text: str) -> bool:
+    recipient, token = _slack_destination()
+    if not recipient or not token:
+        return False
+    from slack_sdk import WebClient
+    client = WebClient(token=token)
+    channel = recipient
+    if recipient.startswith(("U", "W")):
+        channel = client.conversations_open(users=[recipient])["channel"]["id"]
+    client.chat_postMessage(channel=channel, text=text + REPORT_FOOTER)
+    return True
+
+
+# Replace the normal issue sender so every problem alert also contains the report link.
+def _send_issue_slack_with_report(case_row, qa: dict) -> bool:
+    settings = read_automation_settings()
+    if not settings.get("slack_on_qa_issue", True):
+        return False
+
+    source = str(qa.get("matrix_source") or "").strip()
+    process = str(qa.get("process") or "Unspecified process").strip()
+    if source == qa_worker.BEHAVIOR_SOURCE:
+        text = (
+            "Attention\n"
+            f"Booking: {case_row['itinerary'] or 'N/A'}\n"
+            f"Agent: {case_row['agent'] or 'N/A'} from {case_row['call_center'] or 'N/A'} did not follow this process: \"{process}\".\n"
+            f"Source: {qa_worker.BEHAVIOR_SOURCE}."
+        )
+    else:
+        text = alert_text(case_row["itinerary"], case_row["agent"], case_row["call_center"], process)
+    return _post_slack(text)
+
+
+qa_worker._send_issue_slack = _send_issue_slack_with_report
+
 # Send a positive Slack notification too, so a clean QA is visible and testable.
 _original_process_case = qa_worker.process_case
 
 
 def _send_good_job_slack(case_row) -> bool:
-    with qa_worker.db() as c:
-        raw = {r["key"]: r["value"] for r in c.execute("SELECT key,value FROM settings")}
-    if raw.get("slack_enabled", "false") != "true":
-        return False
-    recipient = raw.get("slack_recipient_id", "").strip()
-    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
-    if not recipient or not token:
-        return False
-
     itinerary = case_row["itinerary"] or "N/A"
     agent = case_row["agent"] or "N/A"
     center = case_row["call_center"] or "N/A"
@@ -116,15 +163,7 @@ def _send_good_job_slack(case_row) -> bool:
         f"Agent: {agent} from {center}\n"
         f"Result: {result_line}"
     )
-
-    from slack_sdk import WebClient
-
-    client = WebClient(token=token)
-    channel = recipient
-    if recipient.startswith(("U", "W")):
-        channel = client.conversations_open(users=[recipient])["channel"]["id"]
-    client.chat_postMessage(channel=channel, text=text)
-    return True
+    return _post_slack(text)
 
 
 def _process_case_with_good_job(row):
