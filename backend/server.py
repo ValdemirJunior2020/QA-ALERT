@@ -111,7 +111,7 @@ def worker_status():
         errors = c.execute("SELECT COUNT(*) n FROM cases WHERE status='transcription_error'").fetchone()["n"]
         qa_running = c.execute("SELECT COUNT(*) n FROM cases WHERE status='qa_running'").fetchone()["n"]
         qa_errors = c.execute("SELECT COUNT(*) n FROM cases WHERE status='qa_error'").fetchone()["n"]
-        completed_qa = c.execute("SELECT COUNT(*) n FROM cases WHERE status IN ('completed','completed_no_booking')").fetchone()["n"]
+        completed_qa = c.execute("SELECT COUNT(*) n FROM cases WHERE status='completed'").fetchone()["n"]
         last = c.execute(
             """
             SELECT id,call_id,agent,call_center,status,transcript_language,
