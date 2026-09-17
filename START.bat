@@ -19,6 +19,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
+python -m backend.repair_legacy_cases
+
 set "CF_CONFIG=%USERPROFILE%\.cloudflared\config.yml"
 
 where cloudflared >nul 2>nul
