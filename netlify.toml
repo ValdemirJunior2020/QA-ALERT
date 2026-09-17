@@ -5,6 +5,12 @@
 [functions]
   node_bundler = "esbuild"
 
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api-proxy/:splat"
+  status = 200
+  force = true
+
 [[headers]]
   for = "/*"
   [headers.values]
