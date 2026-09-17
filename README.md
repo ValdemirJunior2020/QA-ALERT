@@ -1,6 +1,6 @@
 # QA ALERT
 
-Local-first HotelPlanner QA monitoring command center.
+Local-first HotelPlanner QA monitoring command center with a Netlify-hosted Pixel Office frontend.
 
 ## Goals
 
@@ -9,13 +9,14 @@ Local-first HotelPlanner QA monitoring command center.
 - Queue multiple calls safely when they arrive together
 - Collect call audio, booking details, documentation, agent/call-center metadata
 - Transcribe locally
-- Delete audio after a successful transcription
-- QA locally with Ollama using the QA form, Matrix, and process-update documents in `knowledge/`
-- Send Slack alerts only for configured serious findings
+- Delete full audio after successful transcription while retaining only configured evidence clips for flagged cases
+- QA locally with Ollama using the QA Form / Rubric, Original Matrix, and **Matrix update emails sent**
+- Treat **Matrix update emails sent** as the highest-priority process source when it overwrites the Matrix
+- Send Slack alerts only for configured findings
 - Save call/transcript/booking/QA data locally
 - Export saved QA data to Excel from the dashboard
 - Use the interactive Pixel Office as the main worker/status UI
-- Optionally publish the local dashboard through Cloudflare Tunnel
+- Host the frontend on Netlify while keeping the QA engine on the local Windows PC
 
 ## Concurrency design
 
@@ -25,28 +26,51 @@ If 5 calls arrive at the same scan, all 5 are registered immediately. Lightweigh
 
 - FastAPI local backend
 - SQLite in WAL mode (local persistent queue + QA database)
-- Playwright adapter for HotelPlanner monitoring
-- Faster-Whisper/Whisper-compatible local transcription layer
+- Playwright/configurable HotelPlanner monitoring adapter
+- Local Whisper-compatible transcription layer
 - Ollama local QA engine
-- React/Vite Pixel Office frontend
+- Pixel Office web frontend
 - openpyxl Excel exports
-- Slack Incoming Webhook alerts
-- Cloudflare Tunnel for the permanent domain (optional)
+- Slack bot messaging with configurable recipient
+- Netlify frontend hosting + API proxy
+- Cloudflare Tunnel for the permanent backend domain
 
-## Start
+## Local start
 
 1. Run `INSTALL.bat` once.
-2. Put your QA form, Matrix, and update documents inside `knowledge/`.
+2. Keep the three QA sources of truth on the local machine.
 3. Run `START.bat`.
-4. Open `http://localhost:8787`.
-5. Configure HotelPlanner monitoring, Ollama, Slack, and worker limits from Settings.
+4. Open `http://localhost:8787` for direct local access.
+5. Configure monitoring, Ollama, Slack, evidence retention and worker limits from Settings.
+
+## Netlify
+
+The repository is ready to connect directly to Netlify.
+
+- Publish directory: `frontend`
+- Functions directory: `netlify/functions`
+- Build command: none required
+
+Add this Netlify environment variable:
+
+`QA_ALERT_BACKEND_URL=https://YOUR-CLOUDFLARE-QA-DOMAIN`
+
+Do not include `/api` at the end.
+
+The Netlify frontend continues using `/api/...`. A Netlify function securely proxies those calls to the local QA backend through Cloudflare. Excel downloads are proxied as binary responses as well.
+
+See `docs/NETLIFY.md` for the full setup.
 
 ## Cloudflare
 
-The recommended public address is a protected subdomain such as `qa.hotelplannerqa.com` routed through Cloudflare Tunnel to `http://localhost:8787`. Do not expose the HotelPlanner browser profile, Slack webhook, or local secrets through Git.
+Route your protected Cloudflare Tunnel hostname to:
 
-See `docs/ARCHITECTURE.md` and `docs/CLOUDFLARE.md`.
+`http://127.0.0.1:8787`
+
+If Cloudflare Access protects that hostname, Netlify can use optional `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` environment variables. Those values remain server-side and never appear in the Pixel Office browser.
 
 ## Important
 
-The HotelPlanner page adapter is intentionally configuration-driven. Exact selectors and download behavior must match the authenticated HotelPlanner page you use; they are not hard-coded from guesses. Existing `Downloads\\QA-CALLS` collector output is also supported as an ingestion path while the direct page watcher is being finalized.
+The HotelPlanner page adapter remains configuration-driven. Exact selectors and download behavior must match the authenticated HotelPlanner page you use; they are not hard-coded from guesses. Existing `Downloads\\QA-CALLS` collector output remains the safe ingestion path while the direct watcher is finalized.
+
+Never commit `.env`, Slack tokens, HotelPlanner browser sessions, recordings, evidence audio, SQLite databases, exports or Cloudflare secrets.
