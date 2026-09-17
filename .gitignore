@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.local
+secrets/
+data/*.db
+data/*.db-*
+data/evidence/
+data/calls/
+logs/
+exports/
+backups/
+playwright-profile/
+node_modules/
+dist/
